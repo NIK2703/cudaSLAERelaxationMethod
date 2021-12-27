@@ -33,13 +33,15 @@ relaxationMatrixReductionKernel(double* A, double* B, int n, double* P, double* 
     //вычисление приведённой матрицы коэффициентов
    for (int ptrx = tx; ptrx < n; ptrx += bdx) {
         for (int ptry = ty; ptry < n; ptry += bdy) {
-            P[ptrx + ptry * bdx] = -A[ptrx + ptry * bdx] / A[ptrx + ptrx * bdx];
+            P[ptrx + ptry * n] = -A[ptrx + ptry * n] / A[ptrx + ptrx * n];
         }
     }
 
+   //P[tx + ty * bdx] = -A[tx + ty * bdx] / A[tx + tx * bdx];
+
     //вычисление приведённой матрицы-столбца
     for (int tind = tx + ty * bdx; tind < n; tind += tnum) {
-        C[tind] = B[tind] / A[tind + tind * bdx];
+        C[tind] = B[tind] / A[tind + tind * n];
     }
 }
 
