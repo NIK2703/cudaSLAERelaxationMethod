@@ -6,6 +6,9 @@
 
 void printMassive(double* mas, int size);
 void printMatrix(double** matrix, int size_x, int size_y);
+double** squeezeMatrix(double* matrix, int size_x, int size_y);
+
+//const int N = 4;
 
 // Выделение константной памяти на GPU под коэффициенты и свободные члены для ускорения доступа
 //__constant__ double** constP[N][N];
@@ -60,7 +63,8 @@ void printMatrix(double** matrix, int size_x, int size_y);
           массив ответов X, куда записываются найденные значения неизвестных.
 */
 __global__ void
-relaxationKernel(double* A, double* B, double* initX, int n, double eps, double* X)
+relaxationKernel(double* A, double* B, int n, double eps,
+                    double* X, double* P, double* C)
 {
     // идентификтаоры блока и потока
    /*int bx = blockIdx.x;
@@ -73,10 +77,6 @@ relaxationKernel(double* A, double* B, double* initX, int n, double eps, double*
     //число потоков в блоке
     int tnum = bdx * bdy;
 
-    //выделение места в разделяемой памяти под хранение приведённых коэффициентов и свободных членов 
-    __shared__ double P[n * n];
-    __shared__ double C[n];
-
     //вычисление приведённой матрицы коэффициентов
     for (int ptrx = tx; ptrx < n; ptrx += bdx) {
         for (int ptry = ty; ptry < n; ptry += bdy) {
@@ -85,33 +85,73 @@ relaxationKernel(double* A, double* B, double* initX, int n, double eps, double*
     }
 
     //глобальный индекс потока
-    int tind = tx + ty * bdx;
-    //вычисление приведённой матрицы-столбца
-    for (; tind < n; tind += tnum) {
-        C[tind] = B[tind] / A[tind + tind * n];
+    int tid = tx + ty * bdx;
+    //вычисление приведённого матрицы-столбца, инициализация текущего ответа начальным значением
+    for (int i = tid; i < n; i += tnum) {
+        C[i] = B[i] / A[i + i * n];
     }
+
+    
+    if (tid == 0) {
+        printf("\n");
+        for (int i = 0; i < n; i++) {
+            for (int j = 0; j < n; j++) {
+                printf("%lf ", A[i * n + j]);
+            }
+            printf("\n");
+        }
+        printf("\n");
+    }
+    
+
+    
+    if (tid == 0) {
+        printf("\n");
+        for (int i = 0; i < n; i ++) {
+            for (int j = 0; j < n; j++) {
+                printf("%lf ", P[i * n + j]);
+            }
+            printf("\n");
+        }
+        printf("\n");
+    }
+    
 
     //приведение матрицы должно быть полностью завершено, прежде потоки перейдут 
     //  к вычислению невязок
     __syncthreads();
 
-    __shared__ double tempX[n];
-    __shared__ double dX[n];
-
-
-    //условие перхода к следующей итерации
-    __shared__ bool nextIter = true;
+    //условие перехода к следующей итерации
+    __shared__ bool nextIter;
+    nextIter = true;
 
     while (nextIter) {
+        if (tid == 0) {
+            nextIter = false;
+        }
 
         // Запись слагаемых в массив частичных сумм
 
         //массив для частичных сумм невязок (n + 1 - количество слагаемых в невязке)
-        __shared__ double sumArray[(n + 1) * n];
-        int discrepIndex = tind / (n + 1); //номер невязки, с которой работает поток
-        int termIndex = tind % (n + 1); //номер слагаемого в невязке, с которым работает поток
-        sumArray[tind] = termIndex == 0? С[discrepIndex] :
-                         termIndex == 1? -
+        extern __shared__ double sumArray[]; //(n+1) * n
+        int discrepTermNum = (n + 1) * n;
+        for (int i = tid; i < discrepTermNum; i += tnum) {
+            int discrepIndex = i / (n + 1); //номер невязки, с которой работает поток
+            int termIndex = i % (n + 1); //номер слагаемого в невязке, с которым работает поток
+            sumArray[i] = termIndex == 0 ? C[discrepIndex] :
+                termIndex == 1 ? -X[discrepIndex] :
+                termIndex - 2 < discrepIndex ? P[discrepIndex * n + (termIndex - 2)] :
+                P[discrepIndex * n + (termIndex - 1)];
+        }
+
+        if (tid == 0) {
+            for (int i = 0; i < (n + 1) * n; i++) {
+                printf("%lf ", sumArray[i]);
+                if ((i + 1) % (n + 1) == 0) {
+                    printf("\n");
+                }
+            }
+        }
     }
 
 }
@@ -161,10 +201,12 @@ double** squeezeMatrix(double* matrix, int size_x, int size_y) {
 /*
 
 */
-double* relaxationMethod(double** A, double* B, int n ) {
+double* relaxationMethod(double** A, double* B, int n, double* initX, double eps) {
     double* ADev;
     double* BDev;
-    //float* nDev;
+    //int* nDev;
+    //double* epsDev;
+    double* XDev;
     double* PDev;
     double* CDev;
 
@@ -173,32 +215,32 @@ double* relaxationMethod(double** A, double* B, int n ) {
     cudaMalloc(&ADev, n * n * sizeof(double));
     cudaMalloc(&BDev, n * sizeof(double));
     //cudaMalloc(&nDev, sizeof(int));
+    //cudaMalloc(&epsDev, sizeof(double));
+    cudaMalloc(&XDev, n * sizeof(double));
     cudaMalloc(&PDev, n * n * sizeof(double));
     cudaMalloc(&CDev, n * sizeof(double));
 
     cudaMemcpy(ADev, stretchedA, n * n * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(BDev, B, n * sizeof(double), cudaMemcpyHostToDevice);
-    //cudaMemcpy(nDev, n, sizeof(int), cudaMemcpyHostToDevice);
+    //cudaMemcpy(nDev, &n, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(XDev, initX, n * sizeof(double), cudaMemcpyHostToDevice);
+    //cudaMemcpy(epsDev, &eps, sizeof(double), cudaMemcpyHostToDevice);
 
-    relaxationMatrixReductionKernel <<<1, dim3(n, n)>>>(ADev, BDev, n, PDev, CDev);
+    relaxationKernel <<<1, dim3(n, n)>>>(ADev, BDev, n, eps, /*nDev, epsDev,*/ XDev, PDev, CDev);
 
-    double* stretchedP = new double[n * n];
-    double* C = new double[n];
+    double* X = new double[n];
 
-    cudaMemcpy(stretchedP, PDev, n * n * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(C, CDev, n * sizeof(double), cudaMemcpyDeviceToHost);
+    cudaMemcpy(X, XDev, n * n * sizeof(double), cudaMemcpyDeviceToHost);
 
-    double** P = squeezeMatrix(stretchedP, n, n);
-
-    printMatrix(P, n, n);
-    printf("\n");
-    printMassive(C, n);
+    //printMassive(X, n);
 
     cudaFree(ADev);
     cudaFree(BDev);
     //cudaFree(nDev);
+    //cudaFree(epsDev);
+    cudaFree(XDev);
 
-    return NULL;
+    return X;
 }
 
 double** readMatrix(FILE *input, int size_x, int size_y) {
@@ -251,7 +293,13 @@ int main(void)
     double** A = readMatrix(input_data, n, n);
     double* B = readMassive(input_data, n);
 
-    relaxationMethod(A, B, n);
+    double* initX = new double[n];
+    for (int i = 0; i < n; i++) {
+        initX[i] = i;
+    }
+    double eps = 0.01;
+
+    relaxationMethod(A, B, n, initX, eps);
 
     /*printMatrix(A, n, n);
     printf("\n");
