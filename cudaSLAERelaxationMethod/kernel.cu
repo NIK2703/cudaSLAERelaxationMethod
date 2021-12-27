@@ -1,10 +1,15 @@
 ﻿#include <stdio.h>
 
+//#define N 4
 #define INPUT_FILE_PATH "C:\\Users\\User\\source\\repos\\cudaSLAERelaxationMethod\\test_data.txt"
 #define OUTPUT_FILE_PATH "output.txt"
 
 void printMassive(double* mas, int size);
 void printMatrix(double** matrix, int size_x, int size_y);
+
+// Выделение константной памяти на GPU под коэффициенты и свободные члены для ускорения доступа
+//__constant__ double** constP[N][N];
+//__constant__ double* constC[N];
 
 /*
 Функция ядра для приведения исходных матриц коэффициентов и свободных членов
@@ -17,11 +22,49 @@ void printMatrix(double** matrix, int size_x, int size_y);
           матрицу преобразованных коэффициентов P,
           матрицу преобразованных свободных членов C
 */
+//__global__ void
+//relaxationMatrixReductionKernel(double* A, double* B, int n, double* P, double* C) {
+//    // идентификтаоры блока и потока
+//    /*int bx = blockIdx.x;
+//    int by = blockIdx.y;*/
+//    int tx = threadIdx.x;
+//    int ty = threadIdx.y;
+//    //размеры блока по x и по y
+//    int bdx = blockDim.x;
+//    int bdy = blockDim.y;
+//    //число потоков в блоке
+//    int tnum = bdx * bdy;
+//
+//    //вычисление приведённой матрицы коэффициентов
+//   for (int ptrx = tx; ptrx < n; ptrx += bdx) {
+//        for (int ptry = ty; ptry < n; ptry += bdy) {
+//            P[ptrx + ptry * n] = -A[ptrx + ptry * n] / A[ptrx + ptrx * n];
+//        }
+//    }
+//
+//    //вычисление приведённой матрицы-столбца
+//    for (int tind = tx + ty * bdx; tind < n; tind += tnum) {
+//        C[tind] = B[tind] / A[tind + tind * n];
+//    }
+//}
+
+/*
+Функция ядра для решения СЛАУ с ленточной сруктурой матрицы
+Работает с одномерной сеткой из одного двумерного блока с рекомндумыми размерами:
+    Высота: количество уравнений n; Ширина: ширина ленты
+Принимает матрицу коэффициентов A,
+          массив свободных членов B,
+          начальное приближение initX,
+          порядок матрицы коэффциентов n,
+          точность eps,
+          массив ответов X, куда записываются найденные значения неизвестных.
+*/
 __global__ void
-relaxationMatrixReductionKernel(double* A, double* B, int n, double* P, double* C) {
+relaxationKernel(double* A, double* B, double* initX, int n, double eps, double* X)
+{
     // идентификтаоры блока и потока
-    /*int bx = blockIdx.x;
-    int by = blockIdx.y;*/
+   /*int bx = blockIdx.x;
+   int by = blockIdx.y;*/
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     //размеры блока по x и по y
@@ -30,42 +73,48 @@ relaxationMatrixReductionKernel(double* A, double* B, int n, double* P, double* 
     //число потоков в блоке
     int tnum = bdx * bdy;
 
+    //выделение места в разделяемой памяти под хранение приведённых коэффициентов и свободных членов 
+    __shared__ double P[n * n];
+    __shared__ double C[n];
+
     //вычисление приведённой матрицы коэффициентов
-   for (int ptrx = tx; ptrx < n; ptrx += bdx) {
+    for (int ptrx = tx; ptrx < n; ptrx += bdx) {
         for (int ptry = ty; ptry < n; ptry += bdy) {
             P[ptrx + ptry * n] = -A[ptrx + ptry * n] / A[ptrx + ptrx * n];
         }
     }
 
-   //P[tx + ty * bdx] = -A[tx + ty * bdx] / A[tx + tx * bdx];
-
+    //глобальный индекс потока
+    int tind = tx + ty * bdx;
     //вычисление приведённой матрицы-столбца
-    for (int tind = tx + ty * bdx; tind < n; tind += tnum) {
+    for (; tind < n; tind += tnum) {
         C[tind] = B[tind] / A[tind + tind * n];
     }
-}
 
-/*
-Функция ядра для решения СЛАУ с ленточной сруктурой матрицы
-Работает с одномерной сеткой из одного двумерного блока с рекомндумыми размерами:
-    Высота: количество уравнений n; Ширина: ширина ленты
-Принимает матрицу коэффициентов A,
-          массив свободных членов B,
-          массив ответов X, куда записываются найденные значения неизвестных,
-          приближения eps.
-*/
-//__global__ void
-//relaxationIterationKernel(double** P, double* C, double* X, double eps)
-//{
-//    // идентификтаоры блока и потока
-//    /*int bx = blockIdx.x;
-//    int by = blockIdx.y;*/
-//    int tx = threadIdx.x;
-//    int ty = threadIdx.y;
-//
-//
-//
-//}
+    //приведение матрицы должно быть полностью завершено, прежде потоки перейдут 
+    //  к вычислению невязок
+    __syncthreads();
+
+    __shared__ double tempX[n];
+    __shared__ double dX[n];
+
+
+    //условие перхода к следующей итерации
+    __shared__ bool nextIter = true;
+
+    while (nextIter) {
+
+        // Запись слагаемых в массив частичных сумм
+
+        //массив для частичных сумм невязок (n + 1 - количество слагаемых в невязке)
+        __shared__ double sumArray[(n + 1) * n];
+        int discrepIndex = tind / (n + 1); //номер невязки, с которой работает поток
+        int termIndex = tind % (n + 1); //номер слагаемого в невязке, с которым работает поток
+        sumArray[tind] = termIndex == 0? С[discrepIndex] :
+                         termIndex == 1? -
+    }
+
+}
 
 //double* stretchMatrix(double** matrix, int size_x, int size_y) {
 //    double* stretchedMatrix = new double[size_x * size_y];
