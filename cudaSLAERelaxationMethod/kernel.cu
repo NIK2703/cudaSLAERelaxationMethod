@@ -31,7 +31,7 @@ relaxationMatrixReductionKernel(double* A, double* B, int n, double* P, double* 
     int tnum = bdx * bdy;
 
     //вычисление приведённой матрицы коэффициентов
-    for (int ptrx = tx; ptrx < n; ptrx += bdx) {
+   for (int ptrx = tx; ptrx < n; ptrx += bdx) {
         for (int ptry = ty; ptry < n; ptry += bdy) {
             P[ptrx + ptry * bdx] = -A[ptrx + ptry * bdx] / A[ptrx + ptrx * bdx];
         }
@@ -65,22 +65,43 @@ relaxationMatrixReductionKernel(double* A, double* B, int n, double* P, double* 
 //
 //}
 
+//double* stretchMatrix(double** matrix, int size_x, int size_y) {
+//    double* stretchedMatrix = new double[size_x * size_y];
+//    for (int i = 0; i < size_x; i++) {
+//        for (int j = 0; j < size_y; j++) {
+//            stretchedMatrix[i + j * size_x] = matrix[i][j];
+//        }
+//    }
+//    return stretchedMatrix;
+//}
+//
+//double** squeezeMatrix(double* matrix, int size_x, int size_y) {
+//    double** squeezedMatrix = new double*[size_x];
+//    for (int i = 0; i < size_x; i++) {
+//        squeezedMatrix[i] = new double[size_y];
+//        for (int j = 0; j < size_y; j++) {
+//            squeezedMatrix[i][j] = matrix[i + j * size_x] ;
+//        }
+//    }
+//    return squeezedMatrix;
+//}
+
 double* stretchMatrix(double** matrix, int size_x, int size_y) {
     double* stretchedMatrix = new double[size_x * size_y];
     for (int i = 0; i < size_x; i++) {
         for (int j = 0; j < size_y; j++) {
-            stretchedMatrix[i + j * size_x] = matrix[i][j];
+            stretchedMatrix[i * size_y + j] = matrix[i][j];
         }
     }
     return stretchedMatrix;
 }
 
 double** squeezeMatrix(double* matrix, int size_x, int size_y) {
-    double** squeezedMatrix = new double*[size_x];
+    double** squeezedMatrix = new double* [size_x];
     for (int i = 0; i < size_x; i++) {
         squeezedMatrix[i] = new double[size_y];
         for (int j = 0; j < size_y; j++) {
-            squeezedMatrix[i][j] = matrix[i + j * size_x] ;
+            squeezedMatrix[i][j] = matrix[i * size_y + j];
         }
     }
     return squeezedMatrix;
@@ -95,22 +116,28 @@ double* relaxationMethod(double** A, double* B, int n ) {
     //float* nDev;
     double* PDev;
     double* CDev;
+
+    double* stretchedA = stretchMatrix(A, n, n);
+
     cudaMalloc(&ADev, n * n * sizeof(double));
     cudaMalloc(&BDev, n * sizeof(double));
     //cudaMalloc(&nDev, sizeof(int));
     cudaMalloc(&PDev, n * n * sizeof(double));
     cudaMalloc(&CDev, n * sizeof(double));
 
-    cudaMemcpy(ADev, A, n * n * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(ADev, stretchedA, n * n * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(BDev, B, n * sizeof(double), cudaMemcpyHostToDevice);
     //cudaMemcpy(nDev, n, sizeof(int), cudaMemcpyHostToDevice);
+
     relaxationMatrixReductionKernel <<<1, dim3(n, n)>>>(ADev, BDev, n, PDev, CDev);
 
-    cudaMemcpy(P, PDev, n * n * sizeof(double), cudaMemcpyDeviceToHost);
+    double* stretchedP = new double[n * n];
+    double* C = new double[n];
+
+    cudaMemcpy(stretchedP, PDev, n * n * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(C, CDev, n * sizeof(double), cudaMemcpyDeviceToHost);
 
-    double** P;
-    double* C;
+    double** P = squeezeMatrix(stretchedP, n, n);
 
     printMatrix(P, n, n);
     printf("\n");
@@ -120,7 +147,7 @@ double* relaxationMethod(double** A, double* B, int n ) {
     cudaFree(BDev);
     //cudaFree(nDev);
 
-    return null
+    return NULL;
 }
 
 double** readMatrix(FILE *input, int size_x, int size_y) {
@@ -173,9 +200,23 @@ int main(void)
     double** A = readMatrix(input_data, n, n);
     double* B = readMassive(input_data, n);
 
-    printMatrix(A, n, n); 
+    relaxationMethod(A, B, n);
+
+    /*printMatrix(A, n, n);
     printf("\n");
-    printMassive(B, n);
+
+    double* stretchedA = stretchMatrix(A, n, n);
+    printMassive(stretchedA, n * n);
+    printf("\n");
+
+    double** squeezedA = squeezeMatrix(stretchedA, n, n);
+    printMatrix(squeezedA, n, n);*/
+
+    
+
+   /* printMatrix(A, n, n); 
+    printf("\n");
+    printMassive(B, n);*/
 
     return 0;
 }
