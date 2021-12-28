@@ -68,8 +68,8 @@ relaxationKernel(double* A, double* B, int n, double eps,
     double* X, double* P, double* C)
 {
     // идентификтаоры блока и потока
-   /*int bx = blockIdx.x;
-   int by = blockIdx.y;*/
+   int bx = blockIdx.x;
+   int by = blockIdx.y;
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     //размеры блока по x и по y
@@ -79,9 +79,9 @@ relaxationKernel(double* A, double* B, int n, double eps,
     int tnum = bdx * bdy;
 
     //вычисление приведённой матрицы коэффициентов
-    for (int ptrx = tx; ptrx < n; ptrx += bdx) {
+    for (int ptrx = tx + ; ptrx < n; ptrx += bdx) {
         for (int ptry = ty; ptry < n; ptry += bdy) {
-            P[ptrx + ptry * n] = -A[ptrx + ptry * n] / A[ptrx * n + ptrx];
+            P[ptrx * n + ptry] = -A[ptrx * n + ptry] / A[ptrx * n + ptrx];
         }
     }
 
@@ -124,8 +124,8 @@ relaxationKernel(double* A, double* B, int n, double eps,
     __shared__ bool nextIter;
     nextIter = true;
 
-    int discrepTermNum = n + 1; //количесвто слагаемых при вычислении одной невязки
-    int totalDiscrepTermNum = discrepTermNum * n; //общее количество слагаемых при вычислении невязок
+    int xTermNum = n; //количесвто слагаемых при вычислении одной невязки
+    int totalXTermNum = xTermNum * n; //общее количество слагаемых при вычислении невязок
 
     while (nextIter) {
         if (tid == 0) {
@@ -135,9 +135,9 @@ relaxationKernel(double* A, double* B, int n, double eps,
         //массив для частичных сумм невязок 
         extern __shared__ double sumArray[]; //(n+1) * n
 
-        for (int i = tid; i < totalDiscrepTermNum; i += tnum) {
-            int discrepIndex = i / discrepTermNum; //номер невязки, с которой работает поток
-            int termIndex = i % discrepTermNum; //номер слагаемого в невязке, с которым работает поток
+        for (int i = tid; i < totalXTermNum; i += tnum) {
+            int discrepIndex = i / xTermNum; //номер невязки, с которой работает поток
+            int termIndex = i % xTermNum; //номер слагаемого в невязке, с которым работает поток
 
             // Запись слагаемых невязок в массив частичных сумм
             sumArray[i] = termIndex == 0 ? C[discrepIndex] :
@@ -161,7 +161,7 @@ relaxationKernel(double* A, double* B, int n, double eps,
         }*/
 
         //суммирование слагаемых невязок методом редукции
-		for (int sumRange = discrepTermNum; sumRange > 1;  sumRange = (sumRange + 1) / 2) {
+		for (int sumRange = xTermNum; sumRange > 1;  sumRange = (sumRange + 1) / 2) {
             /*if (tid == 0) {
                 printf("%d \n", sumRange);
             }*/
@@ -169,7 +169,7 @@ relaxationKernel(double* A, double* B, int n, double eps,
 
 				int discrepIndex = i / sumElLimit; //номер невязки, с которой работает поток
 				int termIndex = i % sumElLimit; //номер слагаемого в невязке, с которым работает поток
-                int discrepFirstIndex = discrepIndex * discrepTermNum;
+                int discrepFirstIndex = discrepIndex * xTermNum;
 
 				sumArray[discrepFirstIndex + termIndex] +=
 					sumArray[discrepFirstIndex + (sumRange - termIndex - 1)];
@@ -192,10 +192,10 @@ relaxationKernel(double* A, double* B, int n, double eps,
         __syncthreads();
 
         for (int i = tid; i < n; i += tnum) {
-            if (abs(sumArray[discrepTermNum * i]) > eps) {
+            if (abs(sumArray[xTermNum * i]) > eps) {
                 nextIter = true;
             }
-            X[i] += sumArray[discrepTermNum * i];
+            X[i] += sumArray[xTermNum * i];
             printf("%lf ", X[i]);
         }
         if (tid == 0) {
@@ -214,7 +214,7 @@ relaxationKernel(double* A, double* B, int n, double eps,
         }*/
 
         //массив слагаемых невязок
-       /* if (tid == 0) {
+        if (tid == 0) {
             printf("\n");
             for (int i = 0; i < (n + 1) * n; i++) {
                 printf("%lf ", sumArray[i]);
@@ -223,7 +223,7 @@ relaxationKernel(double* A, double* B, int n, double eps,
                 }
             }
             printf("\n");
-        }*/
+        }
 
 
 
