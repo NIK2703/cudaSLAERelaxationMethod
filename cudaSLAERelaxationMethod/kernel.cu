@@ -1,7 +1,6 @@
 ﻿#include <stdio.h>
 #include <math_functions.h>
 
-//#define N 4
 #define INPUT_FILE_PATH "C:\\Users\\User\\source\\repos\\cudaSLAERelaxationMethod\\test_data.txt"
 #define OUTPUT_FILE_PATH "output.txt"
 
@@ -9,63 +8,23 @@ void printMassive(double* mas, int size);
 void printMatrix(double** matrix, int size_x, int size_y);
 double** squeezeMatrix(double* matrix, int size_x, int size_y);
 
-//const int N = 4;
-
-// Выделение константной памяти на GPU под коэффициенты и свободные члены для ускорения доступа
-//__constant__ double** constP[N][N];
-//__constant__ double* constC[N];
 
 /*
-Функция ядра для приведения исходных матриц коэффициентов и свободных членов
-    задачи СЛАУ с ленточной структурой данных к требуемому в методе реалксации виду
+Функция ядра для решения СЛАУ общем виде
 Работает с одномерной сеткой из одного двумерного блока с рекомндумыми размерами:
-    Высота: количество уравнений n; Ширина: ширина ленты
-Принимает матрицу коэффициентов A,
-          матрица-столбец свободных членов B,
-          порядок матрицы коэффициентов n,
-          матрицу преобразованных коэффициентов P,
-          матрицу преобразованных свободных членов C
-*/
-//__global__ void
-//relaxationMatrixReductionKernel(double* A, double* B, int n, double* P, double* C) {
-//    // идентификтаоры блока и потока
-//    /*int bx = blockIdx.x;
-//    int by = blockIdx.y;*/
-//    int tx = threadIdx.x;
-//    int ty = threadIdx.y;
-//    //размеры блока по x и по y
-//    int bdx = blockDim.x;
-//    int bdy = blockDim.y;
-//    //число потоков в блоке
-//    int tnum = bdx * bdy;
-//
-//    //вычисление приведённой матрицы коэффициентов
-//   for (int ptrx = tx; ptrx < n; ptrx += bdx) {
-//        for (int ptry = ty; ptry < n; ptry += bdy) {
-//            P[ptrx + ptry * n] = -A[ptrx + ptry * n] / A[ptrx + ptrx * n];
-//        }
-//    }
-//
-//    //вычисление приведённой матрицы-столбца
-//    for (int tind = tx + ty * bdx; tind < n; tind += tnum) {
-//        C[tind] = B[tind] / A[tind + tind * n];
-//    }
-//}
-
-/*
-Функция ядра для решения СЛАУ с ленточной сруктурой матрицы
-Работает с одномерной сеткой из одного двумерного блока с рекомндумыми размерами:
-    Высота: количество уравнений n; Ширина: ширина ленты
+    Высота: количество уравнений n; Ширина: количество неизвестных n
 Принимает матрицу коэффициентов A,
           массив свободных членов B,
-          начальное приближение initX,
           порядок матрицы коэффциентов n,
           точность eps,
-          массив ответов X, куда записываются найденные значения неизвестных.
+          массив ответов X (изначально хранит начальное приближение, после выполнения ядра - решение задачи)
+          ссылку на область памяти для хранения приведённой матрицы коэффициентов P,
+          ссылку на область памяти для хранения приведённого матрицы-столбца свободных членов C,
+
 */
 __global__ void
-relaxationKernel(double* A, double* B, int n, double eps,
-    double* X/*, double* prevX*/, double* P, double* C)
+yakobiKernel(double* A, double* B, int n, double eps,
+    double* X, double* P, double* C)
 {
     // идентификтаоры блока и потока
     /*int bx = blockIdx.x;
@@ -91,30 +50,6 @@ relaxationKernel(double* A, double* B, int n, double eps,
     //вычисление приведённого матрицы-столбца, инициализация текущего ответа начальным значением
     for (int i = tid; i < n; i += tnum) {
         C[i] = B[i] / A[i + i * n];
-    }
-
-   // //исходный массив коэффициентов
-   //if (tid == 0) {
-   //     printf("\n");
-   //     for (int i = 0; i < n; i++) {
-   //         for (int j = 0; j < n; j++) {
-   //             printf("%lf ", A[i * n + j]);
-   //         }
-   //         printf("\n");
-   //     }
-   //     printf("\n");
-   // }
-
-    //приведённый массив коэффициентов
-    if (tid == 0) {
-        printf("\n");
-        for (int i = 0; i < n; i ++) {
-            for (int j = 0; j < n; j++) {
-                printf("%lf ", P[i * n + j]);
-            }
-            printf("\n");
-        }
-        printf("\n");
     }
 
     //приведение матрицы должно быть полностью завершено, прежде потоки перейдут 
@@ -147,24 +82,8 @@ relaxationKernel(double* A, double* B, int n, double eps,
 
         }
 
-        
-
-        
-
         //перед тем, как прейти к суммированию, необходимо, чтобы все слагаемые были записаны в массив
         __syncthreads();
-
-
-
-        //массив слагаемых невязок
-        /*if (tid == 0) {
-            for (int i = 0; i < (n + 1) * n; i++) {
-                printf("%lf ", sumArray[i]);
-                if ((i + 1) % (n + 1) == 0) {
-                    printf("\n");
-                }
-            }
-        }*/
 
         //суммирование слагаемых приближений методом редукции
 		for (int sumRange = xTermNum; sumRange > 1;  sumRange = (sumRange + 1) / 2) {
@@ -177,17 +96,6 @@ relaxationKernel(double* A, double* B, int n, double eps,
 				int termIndex = i % sumElLimit; //номер слагаемого в невязке, с которым работает поток
                 int xFirstTermIndex = xIndex * xTermNum;
 
-                if (tid == 0) {
-                    printf("\nsumRange = %d\n", sumRange);
-                    for (int i = 0; i < n * n; i++) {
-                        printf("%lf ", sumArray[i]);
-                        if ((i + 1) % n == 0) {
-                            printf("\n");
-                        }
-                    }
-                    printf("\n");
-                }
-
 				sumArray[xFirstTermIndex + termIndex] +=
 					sumArray[xFirstTermIndex + (sumRange - termIndex - 1)];
 
@@ -195,79 +103,22 @@ relaxationKernel(double* A, double* B, int n, double eps,
 			}
 		}
 
-        if (tid == 0) {
-            printf("\nsumRange\n");
-            for (int i = 0; i < n * n; i++) {
-                printf("%lf ", sumArray[i]);
-                if ((i + 1) % n == 0) {
-                    printf("\n");
-                }
-            }
-            printf("\n");
-        }
-
-        //перед тем, как прибавить полученные невязки к ответам, необходимо дождаться
+        //перед тем, как записать новые приближения, необходимо дождаться
         //  их вычисления методом редукции
         __syncthreads();
 
         for (int i = tid; i < n; i += tnum) {
+            //если разница между предыдущим и новым x не удовлетворяет заданной точночти,
+            //  выполнить ещё итерaцию
             if (abs(sumArray[xTermNum * i] - X[i]) > eps) {
                 nextIter = true;
             }
+            //запись новых приближений
             X[i] = sumArray[xTermNum * i];
-            printf("%lf ", X[i]);
         }
-        if (tid == 0) {
-            printf("\n");
-        }
-
-        /*if (tid == 0) {
-            printf("\n");
-            for (int i = 0; i < n; i++) {
-                for (int j = 0; j < n; j++) {
-                    printf("%lf ", A[i * n + j]);
-                }
-                printf("\n");
-            }
-            printf("\n");
-        }*/
-
-        //массив слагаемых невязок
-       /* if (tid == 0) {
-            printf("\n");
-            for (int i = 0; i < (n + 1) * n; i++) {
-                printf("%lf ", sumArray[i]);
-                if ((i + 1) % (n + 1) == 0) {
-                    printf("\n");
-                }
-            }
-            printf("\n");
-        }*/
-
-
 
     }
 }
-//double* stretchMatrix(double** matrix, int size_x, int size_y) {
-//    double* stretchedMatrix = new double[size_x * size_y];
-//    for (int i = 0; i < size_x; i++) {
-//        for (int j = 0; j < size_y; j++) {
-//            stretchedMatrix[i + j * size_x] = matrix[i][j];
-//        }
-//    }
-//    return stretchedMatrix;
-//}
-//
-//double** squeezeMatrix(double* matrix, int size_x, int size_y) {
-//    double** squeezedMatrix = new double*[size_x];
-//    for (int i = 0; i < size_x; i++) {
-//        squeezedMatrix[i] = new double[size_y];
-//        for (int j = 0; j < size_y; j++) {
-//            squeezedMatrix[i][j] = matrix[i + j * size_x] ;
-//        }
-//    }
-//    return squeezedMatrix;
-//}
 
 double* stretchMatrix(double** matrix, int size_x, int size_y) {
     double* stretchedMatrix = new double[size_x * size_y];
@@ -291,15 +142,12 @@ double** squeezeMatrix(double* matrix, int size_x, int size_y) {
 }
 
 /*
-
+Решение СЛАУ в общем виде методом Якоби на GPU
 */
-double* relaxationMethod(double** A, double* B, int n, double* initX, double eps) {
+double* yakobiMethod(double** A, double* B, int n, double* initX, double eps) {
     double* ADev;
     double* BDev;
-    //int* nDev;
-    //double* epsDev;
     double* XDev;
-    //double* prevXDev;
     double* PDev;
     double* CDev;
 
@@ -307,34 +155,25 @@ double* relaxationMethod(double** A, double* B, int n, double* initX, double eps
 
     cudaMalloc(&ADev, n * n * sizeof(double));
     cudaMalloc(&BDev, n * sizeof(double));
-    //cudaMalloc(&nDev, sizeof(int));
-    //cudaMalloc(&epsDev, sizeof(double));
     cudaMalloc(&XDev, n * sizeof(double));
-    //cudaMalloc(&prevXDev, n * sizeof(double));
     cudaMalloc(&PDev, n * n * sizeof(double));
     cudaMalloc(&CDev, n * sizeof(double));
 
     cudaMemcpy(ADev, stretchedA, n * n * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(BDev, B, n * sizeof(double), cudaMemcpyHostToDevice);
-    //cudaMemcpy(nDev, &n, sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(XDev, initX, n * sizeof(double), cudaMemcpyHostToDevice);
-    //cudaMemcpy(prevXDev, initX, n * sizeof(double), cudaMemcpyHostToDevice);
-    //cudaMemcpy(epsDev, &eps, sizeof(double), cudaMemcpyHostToDevice);
 
-    relaxationKernel <<<1, dim3(n, n)>>>(ADev, BDev, n, eps, XDev/*, prevXDev*/, PDev, CDev);
+    yakobiKernel <<<1, dim3(n, n)>>>(ADev, BDev, n, eps, XDev, PDev, CDev);
 
     double* X = new double[n];
 
     cudaMemcpy(X, XDev, n * sizeof(double), cudaMemcpyDeviceToHost);
 
-    printMassive(X, n);
-
     cudaFree(ADev);
     cudaFree(BDev);
-    //cudaFree(nDev);
-    //cudaFree(epsDev);
     cudaFree(XDev);
-    //cudaFree(prevXDev);
+    cudaFree(PDev);
+    cudaFree(CDev);
 
     return X;
 }
@@ -389,29 +228,15 @@ int main(void)
     double** A = readMatrix(input_data, n, n);
     double* B = readMassive(input_data, n);
 
-    double* initX = new double[n];
+    double* X = new double[n];
     for (int i = 0; i < n; i++) {
-        initX[i] = 0;
+        X[i] = 0;
     }
     double eps = 0.01;
 
-    relaxationMethod(A, B, n, initX, eps);
+    X = yakobiMethod(A, B, n, X, eps);
 
-    /*printMatrix(A, n, n);
-    printf("\n");
-
-    double* stretchedA = stretchMatrix(A, n, n);
-    printMassive(stretchedA, n * n);
-    printf("\n");
-
-    double** squeezedA = squeezeMatrix(stretchedA, n, n);
-    printMatrix(squeezedA, n, n);*/
-
-    
-
-   /* printMatrix(A, n, n); 
-    printf("\n");
-    printMassive(B, n);*/
+    printMassive(X, n);
 
     return 0;
 }
