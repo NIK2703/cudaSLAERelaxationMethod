@@ -65,11 +65,11 @@ double** squeezeMatrix(double* matrix, int size_x, int size_y);
 */
 __global__ void
 relaxationKernel(double* A, double* B, int n, double eps,
-    double* X, double* P, double* C)
+    double* X/*, double* prevX*/, double* P, double* C)
 {
     // идентификтаоры блока и потока
-   /*int bx = blockIdx.x;
-   int by = blockIdx.y;*/
+    /*int bx = blockIdx.x;
+    int by = blockIdx.y;*/
     int tx = threadIdx.x;
     int ty = threadIdx.y;
     //размеры блока по x и по y
@@ -77,32 +77,33 @@ relaxationKernel(double* A, double* B, int n, double eps,
     int bdy = blockDim.y;
     //число потоков в блоке
     int tnum = bdx * bdy;
+    int tid = tx + ty * bdx;
 
     //вычисление приведённой матрицы коэффициентов
     for (int ptrx = tx; ptrx < n; ptrx += bdx) {
         for (int ptry = ty; ptry < n; ptry += bdy) {
-            P[ptrx + ptry * n] = -A[ptrx + ptry * n] / A[ptrx * n + ptrx];
+            P[ptrx + ptry * n] = -A[ptrx + ptry * n] / A[ptry + ptry * n];
         }
     }
 
     //глобальный индекс потока
-    int tid = tx + ty * bdx;
+    
     //вычисление приведённого матрицы-столбца, инициализация текущего ответа начальным значением
     for (int i = tid; i < n; i += tnum) {
         C[i] = B[i] / A[i + i * n];
     }
 
-    //исходный массив коэффициентов
-   if (tid == 0) {
-        printf("\n");
-        for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
-                printf("%lf ", A[i * n + j]);
-            }
-            printf("\n");
-        }
-        printf("\n");
-    }
+   // //исходный массив коэффициентов
+   //if (tid == 0) {
+   //     printf("\n");
+   //     for (int i = 0; i < n; i++) {
+   //         for (int j = 0; j < n; j++) {
+   //             printf("%lf ", A[i * n + j]);
+   //         }
+   //         printf("\n");
+   //     }
+   //     printf("\n");
+   // }
 
     //приведённый массив коэффициентов
     if (tid == 0) {
@@ -124,31 +125,36 @@ relaxationKernel(double* A, double* B, int n, double eps,
     __shared__ bool nextIter;
     nextIter = true;
 
-    int discrepTermNum = n + 1; //количесвто слагаемых при вычислении одной невязки
-    int totalDiscrepTermNum = discrepTermNum * n; //общее количество слагаемых при вычислении невязок
+    int xTermNum = n; //количество слагаемых при вычислении одного приближения
+    int totalXTermNum = xTermNum * n; //общее количество слагаемых при вычислении приближений
 
     while (nextIter) {
         if (tid == 0) {
             nextIter = false;
         }
 
-        //массив для частичных сумм невязок 
+        //массив для частичных сумм приближений
         extern __shared__ double sumArray[]; //(n+1) * n
 
-        for (int i = tid; i < totalDiscrepTermNum; i += tnum) {
-            int discrepIndex = i / discrepTermNum; //номер невязки, с которой работает поток
-            int termIndex = i % discrepTermNum; //номер слагаемого в невязке, с которым работает поток
+        for (int i = tid; i < totalXTermNum; i += tnum) {
+            int xIndex = i / xTermNum; //номер приближения, с которой работает поток
+            int termIndex = i % xTermNum; //номер слагаемого в приближении, с которым работает поток
 
-            // Запись слагаемых невязок в массив частичных сумм
-            sumArray[i] = termIndex == 0 ? C[discrepIndex] :
-                termIndex == 1 ? -X[discrepIndex] :
-                termIndex - 2 < discrepIndex ? P[discrepIndex * n + (termIndex - 2)] * X[termIndex - 2] :
-                P[discrepIndex * n + (termIndex - 1)] * X[termIndex - 2];
+            // Запись слагаемых приближений в массив частичных сумм
+            sumArray[i] = termIndex == 0 ? C[xIndex] :
+                termIndex - 1 < xIndex ? P[xIndex * n + (termIndex - 1)] * X[termIndex - 1] :
+                P[xIndex * n + termIndex] * X[termIndex];
 
         }
 
+        
+
+        
+
         //перед тем, как прейти к суммированию, необходимо, чтобы все слагаемые были записаны в массив
         __syncthreads();
+
+
 
         //массив слагаемых невязок
         /*if (tid == 0) {
@@ -160,42 +166,55 @@ relaxationKernel(double* A, double* B, int n, double eps,
             }
         }*/
 
-        //суммирование слагаемых невязок методом редукции
-		for (int sumRange = discrepTermNum; sumRange > 1;  sumRange = (sumRange + 1) / 2) {
+        //суммирование слагаемых приближений методом редукции
+		for (int sumRange = xTermNum; sumRange > 1;  sumRange = (sumRange + 1) / 2) {
             /*if (tid == 0) {
                 printf("%d \n", sumRange);
             }*/
 			for (int i = tid, int sumElLimit = sumRange / 2; i < sumElLimit * n; i += tnum) {
 
-				int discrepIndex = i / sumElLimit; //номер невязки, с которой работает поток
+				int xIndex = i / sumElLimit; //номер невязки, с которой работает поток
 				int termIndex = i % sumElLimit; //номер слагаемого в невязке, с которым работает поток
-                int discrepFirstIndex = discrepIndex * discrepTermNum;
+                int xFirstTermIndex = xIndex * xTermNum;
 
-				sumArray[discrepFirstIndex + termIndex] +=
-					sumArray[discrepFirstIndex + (sumRange - termIndex - 1)];
+                if (tid == 0) {
+                    printf("\nsumRange = %d\n", sumRange);
+                    for (int i = 0; i < n * n; i++) {
+                        printf("%lf ", sumArray[i]);
+                        if ((i + 1) % n == 0) {
+                            printf("\n");
+                        }
+                    }
+                    printf("\n");
+                }
 
-				/*if (tid == 0) {
-					printf("\n");
-					for (int i = 0; i < (n + 1) * n; i++) {
-						printf("%lf ", sumArray[i]);
-						if ((i + 1) % (n + 1) == 0) {
-							printf("\n");
-						}
-					}
-					printf("\n");
-				}*/
+				sumArray[xFirstTermIndex + termIndex] +=
+					sumArray[xFirstTermIndex + (sumRange - termIndex - 1)];
+
+				
 			}
 		}
+
+        if (tid == 0) {
+            printf("\nsumRange\n");
+            for (int i = 0; i < n * n; i++) {
+                printf("%lf ", sumArray[i]);
+                if ((i + 1) % n == 0) {
+                    printf("\n");
+                }
+            }
+            printf("\n");
+        }
 
         //перед тем, как прибавить полученные невязки к ответам, необходимо дождаться
         //  их вычисления методом редукции
         __syncthreads();
 
         for (int i = tid; i < n; i += tnum) {
-            if (abs(sumArray[discrepTermNum * i]) > eps) {
+            if (abs(sumArray[xTermNum * i] - X[i]) > eps) {
                 nextIter = true;
             }
-            X[i] += sumArray[discrepTermNum * i];
+            X[i] = sumArray[xTermNum * i];
             printf("%lf ", X[i]);
         }
         if (tid == 0) {
@@ -280,6 +299,7 @@ double* relaxationMethod(double** A, double* B, int n, double* initX, double eps
     //int* nDev;
     //double* epsDev;
     double* XDev;
+    //double* prevXDev;
     double* PDev;
     double* CDev;
 
@@ -290,6 +310,7 @@ double* relaxationMethod(double** A, double* B, int n, double* initX, double eps
     //cudaMalloc(&nDev, sizeof(int));
     //cudaMalloc(&epsDev, sizeof(double));
     cudaMalloc(&XDev, n * sizeof(double));
+    //cudaMalloc(&prevXDev, n * sizeof(double));
     cudaMalloc(&PDev, n * n * sizeof(double));
     cudaMalloc(&CDev, n * sizeof(double));
 
@@ -297,9 +318,10 @@ double* relaxationMethod(double** A, double* B, int n, double* initX, double eps
     cudaMemcpy(BDev, B, n * sizeof(double), cudaMemcpyHostToDevice);
     //cudaMemcpy(nDev, &n, sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(XDev, initX, n * sizeof(double), cudaMemcpyHostToDevice);
+    //cudaMemcpy(prevXDev, initX, n * sizeof(double), cudaMemcpyHostToDevice);
     //cudaMemcpy(epsDev, &eps, sizeof(double), cudaMemcpyHostToDevice);
 
-    relaxationKernel <<<1, dim3(n, n)>>>(ADev, BDev, n, eps, /*nDev, epsDev,*/ XDev, PDev, CDev);
+    relaxationKernel <<<1, dim3(n, n)>>>(ADev, BDev, n, eps, XDev/*, prevXDev*/, PDev, CDev);
 
     double* X = new double[n];
 
@@ -312,6 +334,7 @@ double* relaxationMethod(double** A, double* B, int n, double* initX, double eps
     //cudaFree(nDev);
     //cudaFree(epsDev);
     cudaFree(XDev);
+    //cudaFree(prevXDev);
 
     return X;
 }
